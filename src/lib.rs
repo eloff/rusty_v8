@@ -122,7 +122,7 @@ pub use script::ScriptOrigin;
 pub use snapshot::FunctionCodeHandling;
 pub use snapshot::SnapshotCreator;
 pub use snapshot::StartupData;
-pub use string::NewStringType;
+pub use string::*;
 pub use support::SharedPtr;
 pub use support::SharedRef;
 pub use support::UniquePtr;

@@ -15,6 +15,8 @@ extern "C" {
     global_object: *const Value,
   ) -> *const Context;
   fn v8__Context__Global(this: *const Context) -> *const Object;
+  fn v8__Context__AllowCodeGenerationFromStrings(this: *mut Context, allow: bool);
+  fn v8__Context__IsCodeGenerationFromStringsAllowed(this: *const Context) -> bool;
 }
 
 impl Context {
@@ -57,5 +59,26 @@ impl Context {
     scope: &mut HandleScope<'s, ()>,
   ) -> Local<'s, Object> {
     unsafe { scope.cast_local(|_| v8__Context__Global(self)) }.unwrap()
+  }
+
+  /// Control whether code generation from strings is allowed. Calling
+  /// this method with false will disable 'eval' and the 'Function'
+  /// constructor for code running in this context. If 'eval' or the
+  /// 'Function' constructor are used an exception will be thrown.
+  ///
+  /// If code generation from strings is not allowed the
+  /// V8::AllowCodeGenerationFromStrings callback will be invoked if
+  /// set before blocking the call to 'eval' or the 'Function'
+  /// constructor. If that callback returns true, the call will be
+  /// allowed, otherwise an exception will be thrown. If no callback is
+  /// set an exception will be thrown.
+  pub fn allow_code_generation_from_strings(&mut self, allow: bool) {
+    unsafe { v8__Context__AllowCodeGenerationFromStrings(self, allow); }
+  }
+
+  /// Returns true if code generation from strings is allowed for the context.
+  /// For more details see allow_code_generation_from_strings(bool) documentation.
+  pub fn is_code_generation_from_strings_allowed(&self) -> bool {
+    unsafe { v8__Context__IsCodeGenerationFromStringsAllowed(self) }
   }
 }
