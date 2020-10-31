@@ -42,7 +42,33 @@ pub enum MicrotasksPolicy {
   Auto = 2,
 }
 
+/// PromiseHook with type Init is called when a new promise is
+/// created. When a new promise is created as part of the chain in the
+/// case of Promise.then or in the intermediate promises created by
+/// Promise.{race, all}/AsyncFunctionAwait, we pass the parent promise
+/// otherwise we pass undefined.
+///
+/// PromiseHook with type Resolve is called at the beginning of
+/// resolve or reject function defined by CreateResolvingFunctions.
+///
+/// PromiseHook with type Before is called at the beginning of the
+/// PromiseReactionJob.
+///
+/// PromiseHook with type After is called right at the end of the
+/// PromiseReactionJob.
+#[derive(Debug)]
+#[repr(C)]
+pub enum PromiseHookType {
+  Init,
+  Resolve,
+  Before,
+  After,
+}
+
 pub type MessageCallback = extern "C" fn(Local<Message>, Local<Value>);
+
+pub type PromiseHook =
+  extern "C" fn(PromiseHookType, Local<Promise>, Local<Value>);
 
 pub type PromiseRejectCallback = extern "C" fn(PromiseRejectMessage);
 
@@ -106,6 +132,7 @@ extern "C" {
   fn v8__Isolate__GetNumberOfDataSlots(this: *const Isolate) -> u32;
   fn v8__Isolate__Enter(this: *mut Isolate);
   fn v8__Isolate__Exit(this: *mut Isolate);
+  fn v8__Isolate__ClearKeptObjects(isolate: *mut Isolate);
   fn v8__Isolate__LowMemoryNotification(isolate: *mut Isolate);
   fn v8__Isolate__GetHeapStatistics(this: *mut Isolate, s: *mut HeapStatistics);
   fn v8__Isolate__SetCaptureStackTraceForUncaughtExceptions(
@@ -127,6 +154,7 @@ extern "C" {
     callback: NearHeapLimitCallback,
     heap_limit: usize,
   );
+  fn v8__Isolate__SetPromiseHook(isolate: *mut Isolate, hook: PromiseHook);
   fn v8__Isolate__SetPromiseRejectCallback(
     isolate: *mut Isolate,
     callback: PromiseRejectCallback,
@@ -159,6 +187,7 @@ extern "C" {
     isolate: *mut Isolate,
     function: *const Function,
   );
+  fn v8__Isolate__SetAllowAtomicsWait(isolate: *mut Isolate, allow: bool);
 
   fn v8__HeapProfiler__TakeHeapSnapshot(
     isolate: *mut Isolate,
@@ -361,6 +390,21 @@ impl Isolate {
     unsafe { v8__Isolate__Exit(self) }
   }
 
+  /// Clears the set of objects held strongly by the heap. This set of
+  /// objects are originally built when a WeakRef is created or
+  /// successfully dereferenced.
+  ///
+  /// This is invoked automatically after microtasks are run. See
+  /// MicrotasksPolicy for when microtasks are run.
+  ///
+  /// This needs to be manually invoked only if the embedder is manually
+  /// running microtasks via a custom MicrotaskQueue class's PerformCheckpoint.
+  /// In that case, it is the embedder's responsibility to make this call at a
+  /// time which does not interrupt synchronous ECMAScript code execution.
+  pub fn clear_kept_objects(&mut self) {
+    unsafe { v8__Isolate__ClearKeptObjects(self) }
+  }
+
   /// Optional notification that the system is running low on memory.
   /// V8 uses these notifications to attempt to free memory.
   pub fn low_memory_notification(&mut self) {
@@ -396,6 +440,12 @@ impl Isolate {
   /// The exception object will be passed to the callback.
   pub fn add_message_listener(&mut self, callback: MessageCallback) -> bool {
     unsafe { v8__Isolate__AddMessageListener(self, callback) }
+  }
+
+  /// Set the PromiseHook callback for various promise lifecycle
+  /// events.
+  pub fn set_promise_hook(&mut self, hook: PromiseHook) {
+    unsafe { v8__Isolate__SetPromiseHook(self, hook) }
   }
 
   /// Set callback to notify about promise reject with no handler, or
@@ -481,6 +531,13 @@ impl Isolate {
   /// Enqueues the callback to the default MicrotaskQueue
   pub fn enqueue_microtask(&mut self, microtask: Local<Function>) {
     unsafe { v8__Isolate__EnqueueMicrotask(self, &*microtask) }
+  }
+
+  /// Set whether calling Atomics.wait (a function that may block) is allowed in
+  /// this isolate. This can also be configured via
+  /// CreateParams::allow_atomics_wait.
+  pub fn set_allow_atomics_wait(&mut self, allow: bool) {
+    unsafe { v8__Isolate__SetAllowAtomicsWait(self, allow) }
   }
 
   /// Disposes the isolate.  The isolate must not be entered by any

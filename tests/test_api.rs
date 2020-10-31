@@ -31,6 +31,7 @@ fn setup() -> SetupGuard {
   let mut g = INIT_LOCK.lock().unwrap();
   *g += 1;
   if *g == 1 {
+    v8::V8::set_flags_from_string("--expose_gc");
     v8::V8::initialize_platform(v8::new_default_platform().unwrap());
     v8::V8::initialize();
   }
@@ -852,7 +853,9 @@ fn add_message_listener() {
     let frame = stack_trace.get_frame(scope, 0).unwrap();
     assert_eq!(1, frame.get_line_number());
     assert_eq!(1, frame.get_column());
-    assert_eq!(3, frame.get_script_id());
+    // Note: V8 flags like --expose_externalize_string and --expose_gc install
+    // scripts of their own and therefore affect the script id that we get.
+    assert_eq!(4, frame.get_script_id());
     assert!(frame.get_script_name(scope).is_none());
     assert!(frame.get_script_name_or_source_url(scope).is_none());
     assert!(frame.get_function_name(scope).is_none());
@@ -1668,6 +1671,25 @@ fn function() {
   }
 }
 
+#[test]
+fn constructor() {
+  let _setup_guard = setup();
+  let isolate = &mut v8::Isolate::new(Default::default());
+
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let global = context.global(scope);
+    let array_name = v8::String::new(scope, "Array").unwrap();
+    let array_constructor = global.get(scope, array_name.into()).unwrap();
+    let array_constructor =
+      v8::Local::<v8::Function>::try_from(array_constructor).unwrap();
+    let array = array_constructor.new_instance(scope, &[]).unwrap();
+    v8::Local::<v8::Array>::try_from(array).unwrap();
+  }
+}
+
 extern "C" fn promise_reject_callback(msg: v8::PromiseRejectMessage) {
   let scope = &mut unsafe { v8::CallbackScope::new(&msg) };
   let event = msg.get_event();
@@ -1723,6 +1745,89 @@ fn promise_reject_callback_no_value() {
       new Promise(kaboom).then(_ => {});
     "#;
     eval(scope, source).unwrap();
+  }
+}
+
+#[test]
+fn promise_hook() {
+  extern "C" fn hook(
+    type_: v8::PromiseHookType,
+    promise: v8::Local<v8::Promise>,
+    _parent: v8::Local<v8::Value>,
+  ) {
+    let scope = &mut unsafe { v8::CallbackScope::new(promise) };
+    let context = promise.creation_context(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let global = context.global(scope);
+    let name = v8::String::new(scope, "hook").unwrap();
+    let func = global.get(scope, name.into()).unwrap();
+    let func = v8::Local::<v8::Function>::try_from(func).unwrap();
+    let args = &[v8::Integer::new(scope, type_ as i32).into(), promise.into()];
+    func.call(scope, global.into(), args).unwrap();
+  }
+  let _setup_guard = setup();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_promise_hook(hook);
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let source = r#"
+      var promises = new Set();
+      function hook(type, promise) {
+        if (type === /* Init    */ 0) promises.add(promise);
+        if (type === /* Resolve */ 1) promises.delete(promise);
+      }
+      function expect(expected, actual = promises.size) {
+        if (actual !== expected) throw `expected ${expected}, actual ${actual}`;
+      }
+      expect(0);
+      new Promise(resolve => {
+        expect(1);
+        resolve();
+        expect(0);
+      });
+      expect(0);
+      new Promise(() => {});
+      expect(1);
+      promises.values().next().value
+    "#;
+    let promise = eval(scope, source).unwrap();
+    let promise = v8::Local::<v8::Promise>::try_from(promise).unwrap();
+    assert!(!promise.has_handler());
+    assert_eq!(promise.state(), v8::PromiseState::Pending);
+  }
+}
+
+#[test]
+fn allow_atomics_wait() {
+  let _setup_guard = setup();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  for allow in &[false, true, false] {
+    let allow = *allow;
+    isolate.set_allow_atomics_wait(allow);
+    {
+      let scope = &mut v8::HandleScope::new(isolate);
+      let context = v8::Context::new(scope);
+      let scope = &mut v8::ContextScope::new(scope, context);
+      let source = r#"
+        const b = new SharedArrayBuffer(4);
+        const a = new Int32Array(b);
+        "timed-out" === Atomics.wait(a, 0, 0, 1);
+      "#;
+      let try_catch = &mut v8::TryCatch::new(scope);
+      let result = eval(try_catch, source);
+      if allow {
+        assert!(!try_catch.has_caught());
+        assert!(result.unwrap().is_true());
+      } else {
+        assert!(try_catch.has_caught());
+        let exc = try_catch.exception().unwrap();
+        let exc = exc.to_string(try_catch).unwrap();
+        let exc = exc.to_rust_string_lossy(try_catch);
+        assert!(exc.contains("Atomics.wait cannot be called in this context"));
+      }
+    }
   }
 }
 
@@ -1805,6 +1910,7 @@ fn module_instantiation_failures1() {
     let module = v8::script_compiler::compile_module(scope, source).unwrap();
     assert_eq!(v8::ModuleStatus::Uninstantiated, module.get_status());
     assert_eq!(2, module.get_module_requests_length());
+    assert!(module.script_id().is_some());
 
     assert_eq!(
       "./foo.js",
@@ -1879,6 +1985,7 @@ fn module_evaluation() {
     let source = v8::script_compiler::Source::new(source_text, &origin);
 
     let module = v8::script_compiler::compile_module(scope, source).unwrap();
+    assert!(module.script_id().is_some());
     assert!(module.is_source_text_module());
     assert!(!module.is_synthetic_module());
     assert_eq!(v8::ModuleStatus::Uninstantiated, module.get_status());
@@ -3479,16 +3586,21 @@ fn module_snapshot() {
       let module = v8::script_compiler::compile_module(scope, source).unwrap();
       assert_eq!(v8::ModuleStatus::Uninstantiated, module.get_status());
 
+      let script_id = module.script_id();
+      assert!(script_id.is_some());
+
       let result = module.instantiate_module(
         scope,
         compile_specifier_as_module_resolve_callback,
       );
       assert!(result.unwrap());
       assert_eq!(v8::ModuleStatus::Instantiated, module.get_status());
+      assert_eq!(script_id, module.script_id());
 
       let result = module.evaluate(scope);
       assert!(result.is_some());
       assert_eq!(v8::ModuleStatus::Evaluated, module.get_status());
+      assert_eq!(script_id, module.script_id());
 
       snapshot_creator.set_default_context(context);
     }
@@ -3671,6 +3783,7 @@ fn synthetic_module() {
   );
   assert!(!module.is_source_text_module());
   assert!(module.is_synthetic_module());
+  assert!(module.script_id().is_none());
   assert_eq!(module.get_status(), v8::ModuleStatus::Uninstantiated);
 
   module
@@ -3773,6 +3886,23 @@ fn private() {
   let p_api2 = v8::Private::for_api(scope, Some(name));
   assert!(p_api2 != p);
   assert!(p_api == p_api2);
+
+  let object = v8::Object::new(scope);
+  let sentinel = v8::Object::new(scope).into();
+  assert!(!object.has_private(scope, p).unwrap());
+  assert!(object.get_private(scope, p).unwrap().is_undefined());
+  // True indicates that the operation didn't throw an
+  // exception, not that it found and deleted a key.
+  assert!(object.delete_private(scope, p).unwrap());
+  assert!(object.set_private(scope, p, sentinel).unwrap());
+  assert!(object.has_private(scope, p).unwrap());
+  assert!(object
+    .get_private(scope, p)
+    .unwrap()
+    .strict_equals(sentinel));
+  assert!(object.delete_private(scope, p).unwrap());
+  assert!(!object.has_private(scope, p).unwrap());
+  assert!(object.get_private(scope, p).unwrap().is_undefined());
 }
 
 #[test]
@@ -4146,4 +4276,32 @@ fn value_serializer_not_implemented() {
     scope.message().unwrap().get(scope).to_rust_string_lossy(scope),
     "Uncaught Error: Deno serializer: get_shared_array_buffer_id not implemented"
   );
+}
+
+#[test]
+fn clear_kept_objects() {
+  let _setup_guard = setup();
+
+  let isolate = &mut v8::Isolate::new(Default::default());
+  isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+
+  let scope = &mut v8::HandleScope::new(isolate);
+  let context = v8::Context::new(scope);
+  let scope = &mut v8::ContextScope::new(scope, context);
+
+  let step1 = r#"
+    var weakrefs = [];
+    for (let i = 0; i < 424242; i++) weakrefs.push(new WeakRef({ i }));
+    gc();
+    if (weakrefs.some(w => !w.deref())) throw "fail";
+  "#;
+
+  let step2 = r#"
+    gc();
+    if (weakrefs.every(w => w.deref())) throw "fail";
+  "#;
+
+  eval(scope, step1).unwrap();
+  scope.clear_kept_objects();
+  eval(scope, step2).unwrap();
 }

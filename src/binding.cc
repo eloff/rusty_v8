@@ -123,6 +123,10 @@ void v8__Isolate__Enter(v8::Isolate* isolate) { isolate->Enter(); }
 
 void v8__Isolate__Exit(v8::Isolate* isolate) { isolate->Exit(); }
 
+void v8__Isolate__ClearKeptObjects(v8::Isolate* isolate) {
+  isolate->ClearKeptObjects();
+}
+
 void v8__Isolate__LowMemoryNotification(v8::Isolate* isolate) {
   isolate->LowMemoryNotification();
 }
@@ -188,6 +192,10 @@ void v8__Isolate__RequestInterrupt(v8::Isolate* isolate,
   isolate->RequestInterrupt(callback, data);
 }
 
+void v8__Isolate__SetPromiseHook(v8::Isolate* isolate, v8::PromiseHook hook) {
+  isolate->SetPromiseHook(hook);
+}
+
 void v8__Isolate__SetPromiseRejectCallback(v8::Isolate* isolate,
                                            v8::PromiseRejectCallback callback) {
   isolate->SetPromiseRejectCallback(callback);
@@ -243,6 +251,10 @@ bool v8__Isolate__IsExecutionTerminating(v8::Isolate* isolate) {
 
 void v8__Isolate__CancelTerminateExecution(v8::Isolate* isolate) {
   isolate->CancelTerminateExecution();
+}
+
+void v8__Isolate__SetAllowAtomicsWait(v8::Isolate* isolate, bool allow) {
+  isolate->SetAllowAtomicsWait(allow);
 }
 
 void v8__Isolate__CreateParams__CONSTRUCT(
@@ -940,6 +952,40 @@ void v8__Object__SetInternalField(const v8::Object& self, int index,
   ptr_to_local(&self)->SetInternalField(index, ptr_to_local(&value));
 }
 
+const v8::Value* v8__Object__GetPrivate(const v8::Object& self,
+                                        const v8::Context& context,
+                                        const v8::Private& key) {
+  return maybe_local_to_ptr(
+      ptr_to_local(&self)->GetPrivate(ptr_to_local(&context),
+                                      ptr_to_local(&key)));
+}
+
+MaybeBool v8__Object__SetPrivate(const v8::Object& self,
+                                 const v8::Context& context,
+                                 const v8::Private& key,
+                                 const v8::Value& value) {
+  return maybe_to_maybe_bool(
+      ptr_to_local(&self)->SetPrivate(ptr_to_local(&context),
+                                      ptr_to_local(&key),
+                                      ptr_to_local(&value)));
+}
+
+MaybeBool v8__Object__DeletePrivate(const v8::Object& self,
+                                    const v8::Context& context,
+                                    const v8::Private& key) {
+  return maybe_to_maybe_bool(
+      ptr_to_local(&self)->DeletePrivate(ptr_to_local(&context),
+                                         ptr_to_local(&key)));
+}
+
+MaybeBool v8__Object__HasPrivate(const v8::Object& self,
+                                 const v8::Context& context,
+                                 const v8::Private& key) {
+  return maybe_to_maybe_bool(
+      ptr_to_local(&self)->HasPrivate(ptr_to_local(&context),
+                                      ptr_to_local(&key)));
+}
+
 const v8::Array* v8__Array__New(v8::Isolate* isolate, int length) {
   return local_to_ptr(v8::Array::New(isolate, length));
 }
@@ -1218,16 +1264,11 @@ const v8::StackTrace* v8__Exception__GetStackTrace(const v8::Value& exception) {
 }
 
 const v8::Function* v8__Function__New(const v8::Context& context,
-                                      v8::FunctionCallback callback) {
+                                      v8::FunctionCallback callback,
+                                      const v8::Value* maybe_data) {
   return maybe_local_to_ptr(
-      v8::Function::New(ptr_to_local(&context), callback));
-}
-
-const v8::Function* v8__Function__NewWithData(const v8::Context& context,
-                                              v8::FunctionCallback callback,
-                                              const v8::Value& data) {
-  return maybe_local_to_ptr(
-      v8::Function::New(ptr_to_local(&context), callback, ptr_to_local(&data)));
+      v8::Function::New(ptr_to_local(&context), callback,
+                        ptr_to_local(maybe_data)));
 }
 
 const v8::Value* v8__Function__Call(const v8::Function& self,
@@ -1236,6 +1277,14 @@ const v8::Value* v8__Function__Call(const v8::Function& self,
                                     const v8::Value* const argv[]) {
   return maybe_local_to_ptr(
       ptr_to_local(&self)->Call(ptr_to_local(&context), ptr_to_local(&recv),
+                                argc, const_ptr_array_to_local_array(argv)));
+}
+
+const v8::Object* v8__Function__NewInstance(const v8::Function& self,
+                                    const v8::Context& context, int argc,
+                                    const v8::Value* const argv[]) {
+  return maybe_local_to_ptr(
+      ptr_to_local(&self)->NewInstance(ptr_to_local(&context),
                                 argc, const_ptr_array_to_local_array(argv)));
 }
 
@@ -1903,6 +1952,14 @@ const v8::Value* v8__Module__GetModuleNamespace(const v8::Module& self) {
 
 int v8__Module__GetIdentityHash(const v8::Module& self) {
   return self.GetIdentityHash();
+}
+
+int v8__Module__ScriptId(const v8::Module& self) {
+  // Module::ScriptId() isn't marked const but its implementation is
+  // so this const_cast is sound.
+  // TODO(bnoordhuis) Open V8 CL to mark Module::ScriptId() and
+  // UnboundScript::GetId() const.
+  return const_cast<v8::Module&>(self).ScriptId();
 }
 
 MaybeBool v8__Module__InstantiateModule(const v8::Module& self,
