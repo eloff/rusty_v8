@@ -135,6 +135,7 @@ extern "C" {
   fn v8__Isolate__ClearKeptObjects(isolate: *mut Isolate);
   fn v8__Isolate__LowMemoryNotification(isolate: *mut Isolate);
   fn v8__Isolate__GetHeapStatistics(this: *mut Isolate, s: *mut HeapStatistics);
+  fn v8__Isolate__AdjustAmountOfExternalAllocatedMemory(this: *mut Isolate, change_in_bytes: i64);
   fn v8__Isolate__SetCaptureStackTraceForUncaughtExceptions(
     this: *mut Isolate,
     caputre: bool,
@@ -264,7 +265,7 @@ impl Isolate {
     CreateParams::default()
   }
 
-  pub fn thread_safe_handle(&mut self) -> IsolateHandle {
+  pub fn thread_safe_handle(&self) -> IsolateHandle {
     IsolateHandle::new(self)
   }
 
@@ -414,6 +415,16 @@ impl Isolate {
   /// Get statistics about the heap memory usage.
   pub fn get_heap_statistics(&mut self, s: &mut HeapStatistics) {
     unsafe { v8__Isolate__GetHeapStatistics(self, s) }
+  }
+
+  /// Adjusts the amount of registered external memory. Used to give V8 an
+  /// indication of the amount of externally allocated memory that is kept alive
+  /// by JavaScript objects. V8 uses this to decide when to perform global
+  /// garbage collections. Registering externally allocated memory will trigger
+  /// global garbage collections more often than it would otherwise in an attempt
+  /// to garbage collect the JavaScript objects that keep the externally allocated memory alive.
+  pub fn adjust_amount_of_external_allocated_memory(&mut self, change_in_bytes: i64) {
+    unsafe {v8__Isolate__AdjustAmountOfExternalAllocatedMemory(self, change_in_bytes) }
   }
 
   /// Tells V8 to capture current stack trace when uncaught exception occurs
@@ -645,7 +656,7 @@ impl IsolateHandle {
     self.0.isolate
   }
 
-  fn new(isolate: &mut Isolate) -> Self {
+  fn new(isolate: &Isolate) -> Self {
     Self(isolate.get_annex_arc())
   }
 
