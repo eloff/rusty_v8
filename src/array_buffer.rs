@@ -247,7 +247,7 @@ impl ArrayBuffer {
         )
       })
     }
-    .unwrap()
+        .unwrap()
   }
 
   pub fn with_backing_store<'s>(
@@ -262,7 +262,7 @@ impl ArrayBuffer {
         )
       })
     }
-    .unwrap()
+        .unwrap()
   }
 
   /// Data length in bytes.
@@ -317,5 +317,28 @@ impl ArrayBuffer {
         null_mut(),
       ))
     }
+  }
+
+  /// Returns a new standalone BackingStore that takes over the ownership of
+  /// the given raw buffer.
+  ///
+  /// When the BackingStore is destroyed it calls:
+  ///
+  ///   deleter(data, byte_length, deleter_data)
+  ///
+  /// The result can be later passed to ArrayBuffer::New. The raw pointer
+  /// to the buffer must not be passed again to any V8 API function.
+  pub unsafe fn new_backing_store_from_raw_parts(
+    data: *mut c_void,
+    byte_length: usize,
+    deleter: BackingStoreDeleterCallback,
+    deleter_data: *mut c_void,
+  ) -> UniqueRef<BackingStore> {
+    UniqueRef::from_raw(v8__ArrayBuffer__NewBackingStore__with_data(
+      data,
+      byte_length,
+      deleter,
+      deleter_data,
+    ))
   }
 }
