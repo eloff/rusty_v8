@@ -7,9 +7,11 @@
 #include "v8/include/v8-inspector.h"
 #include "v8/include/v8-platform.h"
 #include "v8/include/v8-profiler.h"
+#include "v8/include/v8-fast-api-calls.h"
 #include "v8/include/v8.h"
 #include "v8/src/execution/isolate-utils-inl.h"
 #include "v8/src/execution/isolate-utils.h"
+#include "v8/src/flags/flags.h"
 #include "v8/src/objects/objects-inl.h"
 #include "v8/src/objects/objects.h"
 #include "v8/src/objects/smi.h"
@@ -55,6 +57,9 @@ static_assert(sizeof(v8::Location) == sizeof(size_t) * 1,
 static_assert(sizeof(v8::SnapshotCreator) == sizeof(size_t) * 1,
               "SnapshotCreator size mismatch");
 
+static_assert(sizeof(v8::CFunction) == sizeof(size_t) * 2,
+              "CFunction size mismatch");
+
 static_assert(sizeof(three_pointers_t) == sizeof(v8_inspector::StringView),
               "StringView size mismatch");
 
@@ -89,8 +94,12 @@ v8::MaybeLocal<v8::Promise> HostImportModuleDynamicallyCallback(
 }
 
 extern "C" {
-void v8__V8__SetFlagsFromCommandLine(int* argc, char** argv) {
-  v8::V8::SetFlagsFromCommandLine(argc, argv, true);
+void v8__V8__SetFlagsFromCommandLine(int* argc, char** argv,
+                                     const char* usage) {
+  namespace i = v8::internal;
+  using HelpOptions = i::FlagList::HelpOptions;
+  HelpOptions help_options = HelpOptions(HelpOptions::kExit, usage);
+  i::FlagList::SetFlagsFromCommandLine(argc, argv, true, help_options);
 }
 
 void v8__V8__SetFlagsFromString(const char* flags, size_t length) {
@@ -730,18 +739,18 @@ int v8__String__WriteUtf8(const v8::String& self, v8::Isolate* isolate,
 }
 
 const v8::Symbol* v8__Symbol__New(v8::Isolate* isolate,
-                                  const v8::String* description) {
-  return local_to_ptr(v8::Symbol::New(isolate, ptr_to_local(description)));
+                                  const v8::String& description) {
+  return local_to_ptr(v8::Symbol::New(isolate, ptr_to_local(&description)));
 }
 
 const v8::Symbol* v8__Symbol__For(v8::Isolate* isolate,
-                                  const v8::String* description) {
-  return local_to_ptr(v8::Symbol::For(isolate, ptr_to_local(description)));
+                                  const v8::String& description) {
+  return local_to_ptr(v8::Symbol::For(isolate, ptr_to_local(&description)));
 }
 
 const v8::Symbol* v8__Symbol__ForApi(v8::Isolate* isolate,
-                                     const v8::String* description) {
-  return local_to_ptr(v8::Symbol::ForApi(isolate, ptr_to_local(description)));
+                                     const v8::String& description) {
+  return local_to_ptr(v8::Symbol::ForApi(isolate, ptr_to_local(&description)));
 }
 
 #define V(NAME)                                                   \
@@ -767,13 +776,13 @@ const v8::Value* v8__Symbol__Description(const v8::Symbol& self) {
 }
 
 const v8::Private* v8__Private__New(v8::Isolate* isolate,
-                                    const v8::String* name) {
-  return local_to_ptr(v8::Private::New(isolate, ptr_to_local(name)));
+                                    const v8::String& name) {
+  return local_to_ptr(v8::Private::New(isolate, ptr_to_local(&name)));
 }
 
 const v8::Private* v8__Private__ForApi(v8::Isolate* isolate,
-                                       const v8::String* name) {
-  return local_to_ptr(v8::Private::ForApi(isolate, ptr_to_local(name)));
+                                       const v8::String& name) {
+  return local_to_ptr(v8::Private::ForApi(isolate, ptr_to_local(&name)));
 }
 
 const v8::Value* v8__Private__Name(const v8::Private& self) {
@@ -1056,7 +1065,7 @@ const v8::BigInt* v8__BigInt__NewFromUnsigned(v8::Isolate* isolate,
 
 const v8::BigInt* v8__BigInt__NewFromWords(const v8::Context& context,
                                            int sign_bit, int word_count,
-                                           const uint64_t* words) {
+                                           const uint64_t words[]) {
   return maybe_local_to_ptr(v8::BigInt::NewFromWords(
       ptr_to_local(&context), sign_bit, word_count, words));
 }
@@ -1074,7 +1083,7 @@ int v8__BigInt__WordCount(const v8::BigInt& self) {
 }
 
 void v8__BigInt__ToWordsArray(const v8::BigInt& self, int* sign_bit,
-                              int* word_count, uint64_t* words) {
+                              int* word_count, uint64_t words[]) {
   ptr_to_local(&self)->ToWordsArray(sign_bit, word_count, words);
 }
 
@@ -1263,12 +1272,17 @@ const v8::StackTrace* v8__Exception__GetStackTrace(const v8::Value& exception) {
   return local_to_ptr(v8::Exception::GetStackTrace(ptr_to_local(&exception)));
 }
 
-const v8::Function* v8__Function__New(const v8::Context& context,
-                                      v8::FunctionCallback callback,
-                                      const v8::Value* maybe_data) {
+const v8::Function* v8__Function__New(
+    const v8::Context& context,
+    v8::FunctionCallback callback,
+    const v8::Value* data_or_null,
+    int length,
+    v8::ConstructorBehavior constructor_behavior,
+    v8::SideEffectType side_effect_type) {
   return maybe_local_to_ptr(
       v8::Function::New(ptr_to_local(&context), callback,
-                        ptr_to_local(maybe_data)));
+                        ptr_to_local(data_or_null), length,
+                        constructor_behavior, side_effect_type));
 }
 
 const v8::Value* v8__Function__Call(const v8::Function& self,
@@ -1289,8 +1303,20 @@ const v8::Object* v8__Function__NewInstance(const v8::Function& self,
 }
 
 const v8::FunctionTemplate* v8__FunctionTemplate__New(
-    v8::Isolate* isolate, v8::FunctionCallback callback = nullptr) {
-  return local_to_ptr(v8::FunctionTemplate::New(isolate, callback));
+    v8::Isolate* isolate,
+    v8::FunctionCallback callback,
+    const v8::Value* data_or_null,
+    const v8::Signature* signature_or_null,
+    int length,
+    v8::ConstructorBehavior constructor_behavior,
+    v8::SideEffectType side_effect_type,
+    const v8::CFunction* c_function_or_null) {
+  return local_to_ptr(
+      v8::FunctionTemplate::New(isolate, callback,
+                                ptr_to_local(data_or_null),
+                                ptr_to_local(signature_or_null), length,
+                                constructor_behavior, side_effect_type,
+                                c_function_or_null));
 }
 
 const v8::Function* v8__FunctionTemplate__GetFunction(
