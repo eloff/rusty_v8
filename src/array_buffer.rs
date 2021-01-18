@@ -328,7 +328,7 @@ impl ArrayBuffer {
         )
       })
     }
-        .unwrap()
+    .unwrap()
   }
 
   pub fn with_backing_store<'s>(
@@ -343,7 +343,7 @@ impl ArrayBuffer {
         )
       })
     }
-        .unwrap()
+    .unwrap()
   }
 
   /// Data length in bytes.
