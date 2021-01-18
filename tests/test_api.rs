@@ -4,6 +4,7 @@
 extern crate lazy_static;
 
 use std::any::type_name;
+use std::cell::RefCell;
 use std::collections::hash_map::DefaultHasher;
 use std::convert::{Into, TryFrom, TryInto};
 use std::ffi::c_void;
@@ -155,6 +156,15 @@ fn test_string() {
     assert_eq!(15, local.length());
     assert_eq!(17, local.utf8_length(scope));
     assert_eq!(reference, local.to_rust_string_lossy(scope));
+    let mut vec = Vec::new();
+    vec.resize(17, 0);
+    let options = v8::WriteOptions::NO_NULL_TERMINATION;
+    let mut nchars = 0;
+    assert_eq!(
+      17,
+      local.write_utf8(scope, &mut vec, Some(&mut nchars), options)
+    );
+    assert_eq!(15, nchars);
   }
   {
     let scope = &mut v8::HandleScope::new(isolate);
@@ -364,7 +374,7 @@ fn get_isolate_from_handle() {
     if let Some(expected_some) = expect_some {
       assert_eq!(maybe_ptr.is_some(), expected_some);
     }
-  };
+  }
 
   fn check_handle<'s, F, D>(
     scope: &mut v8::HandleScope<'s>,
@@ -383,7 +393,7 @@ fn get_isolate_from_handle() {
     let global = v8::Global::new(scope, local);
     let local2 = v8::Local::new(scope, &global);
     check_handle_helper(scope, expect_some, local2);
-  };
+  }
 
   fn check_eval<'s>(
     scope: &mut v8::HandleScope<'s>,
@@ -731,9 +741,18 @@ fn throw_exception() {
 }
 
 #[test]
+fn isolate_termination_methods() {
+  let _setup_guard = setup();
+  let isolate = v8::Isolate::new(Default::default());
+  assert_eq!(false, isolate.is_execution_terminating());
+  assert_eq!(true, isolate.terminate_execution());
+  assert_eq!(true, isolate.cancel_terminate_execution());
+}
+
+#[test]
 fn thread_safe_handle_drop_after_isolate() {
   let _setup_guard = setup();
-  let mut isolate = v8::Isolate::new(Default::default());
+  let isolate = v8::Isolate::new(Default::default());
   let handle = isolate.thread_safe_handle();
   // We can call it twice.
   let handle_ = isolate.thread_safe_handle();
@@ -997,15 +1016,6 @@ fn set_flags_from_command_line() {
     r,
     vec!["binaryname".to_string(), "--should-be-ignored".to_string()]
   );
-}
-
-#[test]
-fn set_flags_from_command_line_with_usage() {
-  let r = v8::V8::set_flags_from_command_line_with_usage(
-    vec!["binaryname".to_string(), "--help".to_string()],
-    Some("Usage: binaryname --startup-src=file\n\n"),
-  );
-  assert_eq!(r, vec!["binaryname".to_string()]);
 }
 
 #[test]
@@ -4325,4 +4335,198 @@ fn clear_kept_objects() {
   eval(scope, step1).unwrap();
   scope.clear_kept_objects();
   eval(scope, step2).unwrap();
+}
+
+#[test]
+fn wasm_streaming_callback() {
+  thread_local! {
+    static WS: RefCell<Option<v8::WasmStreaming>> = RefCell::new(None);
+  }
+
+  let callback = |scope: &mut v8::HandleScope,
+                  url: v8::Local<v8::Value>,
+                  ws: v8::WasmStreaming| {
+    assert_eq!("https://example.com", url.to_rust_string_lossy(scope));
+    WS.with(|slot| assert!(slot.borrow_mut().replace(ws).is_none()));
+  };
+
+  let _setup_guard = setup();
+
+  let isolate = &mut v8::Isolate::new(v8::CreateParams::default());
+  isolate.set_wasm_streaming_callback(callback);
+
+  let scope = &mut v8::HandleScope::new(isolate);
+  let context = v8::Context::new(scope);
+  let scope = &mut v8::ContextScope::new(scope, context);
+
+  let script = r#"
+    globalThis.result = null;
+    WebAssembly
+      .compileStreaming("https://example.com")
+      .then(result => globalThis.result = result);
+  "#;
+  eval(scope, script).unwrap();
+
+  let global = context.global(scope);
+  let name = v8::String::new(scope, "result").unwrap().into();
+  assert!(global.get(scope, name).unwrap().is_null());
+
+  let mut ws = WS.with(|slot| slot.borrow_mut().take().unwrap());
+  assert!(global.get(scope, name).unwrap().is_null());
+
+  // MVP of WASM modules: contains only the magic marker and the version (1).
+  ws.on_bytes_received(&[0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]);
+  assert!(global.get(scope, name).unwrap().is_null());
+
+  ws.finish();
+  assert!(global.get(scope, name).unwrap().is_null());
+
+  scope.perform_microtask_checkpoint();
+  assert!(global.get(scope, name).unwrap().is_wasm_module_object());
+
+  let script = r#"
+    globalThis.result = null;
+    WebAssembly
+      .compileStreaming("https://example.com")
+      .catch(result => globalThis.result = result);
+  "#;
+  eval(scope, script).unwrap();
+
+  let ws = WS.with(|slot| slot.borrow_mut().take().unwrap());
+  assert!(global.get(scope, name).unwrap().is_null());
+
+  let exception = v8::Object::new(scope).into(); // Can be anything.
+  ws.abort(Some(exception));
+  assert!(global.get(scope, name).unwrap().is_null());
+
+  scope.perform_microtask_checkpoint();
+  assert!(global.get(scope, name).unwrap().strict_equals(exception));
+}
+
+#[test]
+fn unbound_script_conversion() {
+  let _setup_guard = setup();
+  let isolate = &mut v8::Isolate::new(Default::default());
+  let scope = &mut v8::HandleScope::new(isolate);
+  let unbound_script = {
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let source = v8::String::new(scope, "'Hello ' + value").unwrap();
+    let script = v8::Script::compile(scope, source, None).unwrap();
+    script.get_unbound_script(scope)
+  };
+
+  {
+    // Execute the script in another context.
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let global_object = scope.get_current_context().global(scope);
+    let key = v8::String::new(scope, "value").unwrap();
+    let value = v8::String::new(scope, "world").unwrap();
+    global_object.set(scope, key.into(), value.into());
+
+    let script = unbound_script.bind_to_current_context(scope);
+    let result = script.run(scope).unwrap();
+    assert_eq!(result.to_rust_string_lossy(scope), "Hello world");
+  }
+}
+
+#[test]
+fn run_with_rust_allocator() {
+  use std::sync::Arc;
+
+  unsafe extern "C" fn allocate(count: &AtomicUsize, n: usize) -> *mut c_void {
+    count.fetch_add(n, Ordering::SeqCst);
+    Box::into_raw(vec![0u8; n].into_boxed_slice()) as *mut [u8] as *mut c_void
+  }
+  unsafe extern "C" fn allocate_uninitialized(
+    count: &AtomicUsize,
+    n: usize,
+  ) -> *mut c_void {
+    count.fetch_add(n, Ordering::SeqCst);
+    let mut store = Vec::with_capacity(n);
+    store.set_len(n);
+    Box::into_raw(store.into_boxed_slice()) as *mut [u8] as *mut c_void
+  }
+  unsafe extern "C" fn free(count: &AtomicUsize, data: *mut c_void, n: usize) {
+    count.fetch_sub(n, Ordering::SeqCst);
+    Box::from_raw(std::slice::from_raw_parts_mut(data as *mut u8, n));
+  }
+  unsafe extern "C" fn reallocate(
+    count: &AtomicUsize,
+    prev: *mut c_void,
+    oldlen: usize,
+    newlen: usize,
+  ) -> *mut c_void {
+    count.fetch_add(newlen.wrapping_sub(oldlen), Ordering::SeqCst);
+    let old_store =
+      Box::from_raw(std::slice::from_raw_parts_mut(prev as *mut u8, oldlen));
+    let mut new_store = Vec::with_capacity(newlen);
+    let copy_len = oldlen.min(newlen);
+    new_store.extend_from_slice(&old_store[..copy_len]);
+    new_store.resize(newlen, 0u8);
+    Box::into_raw(new_store.into_boxed_slice()) as *mut [u8] as *mut c_void
+  }
+  unsafe extern "C" fn drop(count: *const AtomicUsize) {
+    Arc::from_raw(count);
+  }
+
+  let vtable: &'static v8::RustAllocatorVtable<AtomicUsize> =
+    &v8::RustAllocatorVtable {
+      allocate,
+      allocate_uninitialized,
+      free,
+      reallocate,
+      drop,
+    };
+  let count = Arc::new(AtomicUsize::new(0));
+
+  let _setup_guard = setup();
+  let create_params =
+    v8::CreateParams::default().array_buffer_allocator(unsafe {
+      v8::new_rust_allocator(Arc::into_raw(count.clone()), vtable)
+    });
+  let isolate = &mut v8::Isolate::new(create_params);
+
+  {
+    let scope = &mut v8::HandleScope::new(isolate);
+    let context = v8::Context::new(scope);
+    let scope = &mut v8::ContextScope::new(scope, context);
+    let source = v8::String::new(
+      scope,
+      r#"
+        for(let i = 0; i < 10; i++) new ArrayBuffer(1024 * i);
+        "OK";
+      "#,
+    )
+    .unwrap();
+    let script = v8::Script::compile(scope, source, None).unwrap();
+    let result = script.run(scope).unwrap();
+    assert_eq!(result.to_rust_string_lossy(scope), "OK");
+  }
+  let mut stats = v8::HeapStatistics::default();
+  isolate.get_heap_statistics(&mut stats);
+  let count_loaded = count.load(Ordering::SeqCst);
+  assert!(count_loaded > 0);
+  assert!(count_loaded <= stats.external_memory());
+
+  // Force a GC.
+  isolate.low_memory_notification();
+  let count_loaded = count.load(Ordering::SeqCst);
+  assert_eq!(count_loaded, 0);
+}
+
+#[test]
+fn oom_callback() {
+  extern "C" fn oom_handler(_: *const std::os::raw::c_char, _: bool) {
+    unreachable!()
+  }
+
+  let _setup_guard = setup();
+  let params = v8::CreateParams::default().heap_limits(0, 1048576 * 8);
+  let isolate = &mut v8::Isolate::new(params);
+  isolate.set_oom_error_handler(oom_handler);
+
+  // Don't attempt to trigger the OOM callback since we don't have a safe way to
+  // recover from it.
 }

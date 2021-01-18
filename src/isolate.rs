@@ -1,10 +1,15 @@
 // Copyright 2019-2020 the Deno authors. All rights reserved. MIT license.
+use crate::function::FunctionCallbackInfo;
 use crate::isolate_create_params::raw;
 use crate::isolate_create_params::CreateParams;
 use crate::promise::PromiseRejectMessage;
 use crate::scope::data::ScopeData;
+use crate::scope::HandleScope;
 use crate::support::BuildTypeIdHasher;
 use crate::support::Opaque;
+use crate::support::UnitType;
+use crate::wasm::trampoline;
+use crate::wasm::WasmStreaming;
 use crate::Context;
 use crate::Function;
 use crate::Local;
@@ -25,6 +30,7 @@ use std::fmt::{self, Debug, Formatter};
 use std::mem::MaybeUninit;
 use std::ops::Deref;
 use std::ops::DerefMut;
+use std::os::raw::c_char;
 use std::ptr::null_mut;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -117,6 +123,9 @@ pub type NearHeapLimitCallback = extern "C" fn(
   initial_heap_limit: usize,
 ) -> usize;
 
+pub type OOMErrorCallback =
+  extern "C" fn(location: *const c_char, is_heap_oom: bool);
+
 /// Collection of V8 heap information.
 ///
 /// Instances of this class can be passed to v8::Isolate::GetHeapStatistics to
@@ -157,6 +166,10 @@ extern "C" {
     callback: NearHeapLimitCallback,
     heap_limit: usize,
   );
+  fn v8__Isolate__SetOOMErrorHandler(
+    isolate: *mut Isolate,
+    callback: OOMErrorCallback,
+  );
   fn v8__Isolate__SetPromiseHook(isolate: *mut Isolate, hook: PromiseHook);
   fn v8__Isolate__SetPromiseRejectCallback(
     isolate: *mut Isolate,
@@ -191,6 +204,11 @@ extern "C" {
     function: *const Function,
   );
   fn v8__Isolate__SetAllowAtomicsWait(isolate: *mut Isolate, allow: bool);
+
+  fn v8__Isolate__SetWasmStreamingCallback(
+    isolate: *mut Isolate,
+    callback: extern "C" fn(*const FunctionCallbackInfo),
+  );
 
   fn v8__HeapProfiler__TakeHeapSnapshot(
     isolate: *mut Isolate,
@@ -270,6 +288,21 @@ impl Isolate {
 
   pub fn thread_safe_handle(&self) -> IsolateHandle {
     IsolateHandle::new(self)
+  }
+
+  /// See [`IsolateHandle::terminate_execution`]
+  pub fn terminate_execution(&self) -> bool {
+    self.thread_safe_handle().terminate_execution()
+  }
+
+  /// See [`IsolateHandle::cancel_terminate_execution`]
+  pub fn cancel_terminate_execution(&self) -> bool {
+    self.thread_safe_handle().cancel_terminate_execution()
+  }
+
+  /// See [`IsolateHandle::is_execution_terminating`]
+  pub fn is_execution_terminating(&self) -> bool {
+    self.thread_safe_handle().is_execution_terminating()
   }
 
   pub(crate) fn create_annex(
@@ -518,6 +551,10 @@ impl Isolate {
     };
   }
 
+  pub fn set_oom_error_handler(&mut self, callback: OOMErrorCallback) {
+    unsafe { v8__Isolate__SetOOMErrorHandler(self, callback) };
+  }
+
   /// Returns the policy controlling how Microtasks are invoked.
   pub fn get_microtasks_policy(&self) -> MicrotasksPolicy {
     unsafe { v8__Isolate__GetMicrotasksPolicy(self) }
@@ -552,6 +589,20 @@ impl Isolate {
   /// CreateParams::allow_atomics_wait.
   pub fn set_allow_atomics_wait(&mut self, allow: bool) {
     unsafe { v8__Isolate__SetAllowAtomicsWait(self, allow) }
+  }
+
+  /// Embedder injection point for `WebAssembly.compileStreaming(source)`.
+  /// The expectation is that the embedder sets it at most once.
+  ///
+  /// The callback receives the source argument (string, Promise, etc.)
+  /// and an instance of [WasmStreaming]. The [WasmStreaming] instance
+  /// can outlive the callback and is used to feed data chunks to V8
+  /// asynchronously.
+  pub fn set_wasm_streaming_callback<F>(&mut self, _: F)
+  where
+    F: UnitType + Fn(&mut HandleScope, Local<Value>, WasmStreaming),
+  {
+    unsafe { v8__Isolate__SetWasmStreamingCallback(self, trampoline::<F>()) }
   }
 
   /// Disposes the isolate.  The isolate must not be entered by any

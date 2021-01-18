@@ -4,10 +4,10 @@
 
 #include "support.h"
 #include "v8/include/libplatform/libplatform.h"
+#include "v8/include/v8-fast-api-calls.h"
 #include "v8/include/v8-inspector.h"
 #include "v8/include/v8-platform.h"
 #include "v8/include/v8-profiler.h"
-#include "v8/include/v8-fast-api-calls.h"
 #include "v8/include/v8.h"
 #include "v8/src/execution/isolate-utils-inl.h"
 #include "v8/src/execution/isolate-utils.h"
@@ -245,6 +245,11 @@ void v8__Isolate__RemoveNearHeapLimitCallback(
   isolate->RemoveNearHeapLimitCallback(callback, heap_limit);
 }
 
+void v8__Isolate__SetOOMErrorHandler(v8::Isolate* isolate,
+                                     v8::OOMErrorCallback callback) {
+  isolate->SetOOMErrorHandler(callback);
+}
+
 const v8::Value* v8__Isolate__ThrowException(v8::Isolate* isolate,
                                              const v8::Value& exception) {
   return local_to_ptr(isolate->ThrowException(ptr_to_local(&exception)));
@@ -264,6 +269,11 @@ void v8__Isolate__CancelTerminateExecution(v8::Isolate* isolate) {
 
 void v8__Isolate__SetAllowAtomicsWait(v8::Isolate* isolate, bool allow) {
   isolate->SetAllowAtomicsWait(allow);
+}
+
+void v8__Isolate__SetWasmStreamingCallback(v8::Isolate* isolate,
+                                           v8::WasmStreamingCallback callback) {
+  isolate->SetWasmStreamingCallback(callback);
 }
 
 void v8__Isolate__CreateParams__CONSTRUCT(
@@ -964,35 +974,30 @@ void v8__Object__SetInternalField(const v8::Object& self, int index,
 const v8::Value* v8__Object__GetPrivate(const v8::Object& self,
                                         const v8::Context& context,
                                         const v8::Private& key) {
-  return maybe_local_to_ptr(
-      ptr_to_local(&self)->GetPrivate(ptr_to_local(&context),
-                                      ptr_to_local(&key)));
+  return maybe_local_to_ptr(ptr_to_local(&self)->GetPrivate(
+      ptr_to_local(&context), ptr_to_local(&key)));
 }
 
 MaybeBool v8__Object__SetPrivate(const v8::Object& self,
                                  const v8::Context& context,
                                  const v8::Private& key,
                                  const v8::Value& value) {
-  return maybe_to_maybe_bool(
-      ptr_to_local(&self)->SetPrivate(ptr_to_local(&context),
-                                      ptr_to_local(&key),
-                                      ptr_to_local(&value)));
+  return maybe_to_maybe_bool(ptr_to_local(&self)->SetPrivate(
+      ptr_to_local(&context), ptr_to_local(&key), ptr_to_local(&value)));
 }
 
 MaybeBool v8__Object__DeletePrivate(const v8::Object& self,
                                     const v8::Context& context,
                                     const v8::Private& key) {
-  return maybe_to_maybe_bool(
-      ptr_to_local(&self)->DeletePrivate(ptr_to_local(&context),
-                                         ptr_to_local(&key)));
+  return maybe_to_maybe_bool(ptr_to_local(&self)->DeletePrivate(
+      ptr_to_local(&context), ptr_to_local(&key)));
 }
 
 MaybeBool v8__Object__HasPrivate(const v8::Object& self,
                                  const v8::Context& context,
                                  const v8::Private& key) {
-  return maybe_to_maybe_bool(
-      ptr_to_local(&self)->HasPrivate(ptr_to_local(&context),
-                                      ptr_to_local(&key)));
+  return maybe_to_maybe_bool(ptr_to_local(&self)->HasPrivate(
+      ptr_to_local(&context), ptr_to_local(&key)));
 }
 
 const v8::Array* v8__Array__New(v8::Isolate* isolate, int length) {
@@ -1105,8 +1110,57 @@ size_t v8__ArrayBufferView__CopyContents(const v8::ArrayBufferView& self,
   return ptr_to_local(&self)->CopyContents(dest, byte_length);
 }
 
+struct RustAllocatorVtable {
+  void* (*allocate)(void* handle, size_t length);
+  void* (*allocate_uninitialized)(void* handle, size_t length);
+  void (*free)(void* handle, void* data, size_t length);
+  void* (*reallocate)(void* handle, void* data, size_t old_length,
+                      size_t new_length);
+  void (*drop)(void* handle);
+};
+
+class RustAllocator : public v8::ArrayBuffer::Allocator {
+ private:
+  void* handle;
+  const RustAllocatorVtable* vtable;
+
+ public:
+  RustAllocator(void* handle, const RustAllocatorVtable* vtable) {
+    this->handle = handle;
+    this->vtable = vtable;
+  }
+
+  RustAllocator(const RustAllocator& that) = delete;
+  RustAllocator(RustAllocator&& that) = delete;
+  void operator=(const RustAllocator& that) = delete;
+  void operator=(RustAllocator&& that) = delete;
+
+  virtual ~RustAllocator() { vtable->drop(handle); }
+
+  void* Allocate(size_t length) final {
+    return vtable->allocate(handle, length);
+  }
+
+  void* AllocateUninitialized(size_t length) final {
+    return vtable->allocate_uninitialized(handle, length);
+  }
+
+  void Free(void* data, size_t length) final {
+    vtable->free(handle, data, length);
+  }
+
+  void* Reallocate(void* data, size_t old_length, size_t new_length) final {
+    return vtable->reallocate(handle, data, old_length, new_length);
+  }
+};
+
 v8::ArrayBuffer::Allocator* v8__ArrayBuffer__Allocator__NewDefaultAllocator() {
   return v8::ArrayBuffer::Allocator::NewDefaultAllocator();
+}
+
+v8::ArrayBuffer::Allocator* v8__ArrayBuffer__Allocator__NewRustAllocator(
+    void* handle, const RustAllocatorVtable* vtable) {
+  return new RustAllocator(handle, vtable);
 }
 
 void v8__ArrayBuffer__Allocator__DELETE(v8::ArrayBuffer::Allocator* self) {
@@ -1273,16 +1327,13 @@ const v8::StackTrace* v8__Exception__GetStackTrace(const v8::Value& exception) {
 }
 
 const v8::Function* v8__Function__New(
-    const v8::Context& context,
-    v8::FunctionCallback callback,
-    const v8::Value* data_or_null,
-    int length,
+    const v8::Context& context, v8::FunctionCallback callback,
+    const v8::Value* data_or_null, int length,
     v8::ConstructorBehavior constructor_behavior,
     v8::SideEffectType side_effect_type) {
-  return maybe_local_to_ptr(
-      v8::Function::New(ptr_to_local(&context), callback,
-                        ptr_to_local(data_or_null), length,
-                        constructor_behavior, side_effect_type));
+  return maybe_local_to_ptr(v8::Function::New(
+      ptr_to_local(&context), callback, ptr_to_local(data_or_null), length,
+      constructor_behavior, side_effect_type));
 }
 
 const v8::Value* v8__Function__Call(const v8::Function& self,
@@ -1295,28 +1346,23 @@ const v8::Value* v8__Function__Call(const v8::Function& self,
 }
 
 const v8::Object* v8__Function__NewInstance(const v8::Function& self,
-                                    const v8::Context& context, int argc,
-                                    const v8::Value* const argv[]) {
-  return maybe_local_to_ptr(
-      ptr_to_local(&self)->NewInstance(ptr_to_local(&context),
-                                argc, const_ptr_array_to_local_array(argv)));
+                                            const v8::Context& context,
+                                            int argc,
+                                            const v8::Value* const argv[]) {
+  return maybe_local_to_ptr(ptr_to_local(&self)->NewInstance(
+      ptr_to_local(&context), argc, const_ptr_array_to_local_array(argv)));
 }
 
 const v8::FunctionTemplate* v8__FunctionTemplate__New(
-    v8::Isolate* isolate,
-    v8::FunctionCallback callback,
-    const v8::Value* data_or_null,
-    const v8::Signature* signature_or_null,
-    int length,
-    v8::ConstructorBehavior constructor_behavior,
+    v8::Isolate* isolate, v8::FunctionCallback callback,
+    const v8::Value* data_or_null, const v8::Signature* signature_or_null,
+    int length, v8::ConstructorBehavior constructor_behavior,
     v8::SideEffectType side_effect_type,
     const v8::CFunction* c_function_or_null) {
-  return local_to_ptr(
-      v8::FunctionTemplate::New(isolate, callback,
-                                ptr_to_local(data_or_null),
-                                ptr_to_local(signature_or_null), length,
-                                constructor_behavior, side_effect_type,
-                                c_function_or_null));
+  return local_to_ptr(v8::FunctionTemplate::New(
+      isolate, callback, ptr_to_local(data_or_null),
+      ptr_to_local(signature_or_null), length, constructor_behavior,
+      side_effect_type, c_function_or_null));
 }
 
 const v8::Function* v8__FunctionTemplate__GetFunction(
@@ -1496,6 +1542,16 @@ const v8::Script* v8__Script__Compile(const v8::Context& context,
   return maybe_local_to_ptr(
       v8::Script::Compile(ptr_to_local(&context), ptr_to_local(&source),
                           const_cast<v8::ScriptOrigin*>(&origin)));
+}
+
+const v8::UnboundScript* v8__Script__GetUnboundScript(
+    const v8::Script& script) {
+  return local_to_ptr(ptr_to_local(&script)->GetUnboundScript());
+}
+
+const v8::Script* v8__UnboundScript__BindToCurrentContext(
+    const v8::UnboundScript& unbound_script) {
+  return local_to_ptr(ptr_to_local(&unbound_script)->BindToCurrentContext());
 }
 
 const v8::Value* v8__Script__Run(const v8::Script& script,
@@ -2029,6 +2085,37 @@ MaybeBool v8__Module__SetSyntheticModuleExport(const v8::Module& self,
       isolate, ptr_to_local(export_name), ptr_to_local(export_value)));
 }
 
+struct WasmStreamingSharedPtr {
+  std::shared_ptr<v8::WasmStreaming> inner;
+};
+
+static_assert(sizeof(WasmStreamingSharedPtr) <= 2 * sizeof(void*),
+              "std::shared_ptr<v8::WasmStreaming> size mismatch");
+
+void v8__WasmStreaming__Unpack(v8::Isolate* isolate, const v8::Value& value,
+                               WasmStreamingSharedPtr* self) {
+  new (self) WasmStreamingSharedPtr();
+  self->inner = v8::WasmStreaming::Unpack(isolate, ptr_to_local(&value));
+}
+
+void v8__WasmStreaming__shared_ptr_DESTRUCT(WasmStreamingSharedPtr* self) {
+  self->~WasmStreamingSharedPtr();
+}
+
+void v8__WasmStreaming__OnBytesReceived(WasmStreamingSharedPtr* self,
+                                        const uint8_t* data, size_t len) {
+  self->inner->OnBytesReceived(data, len);
+}
+
+void v8__WasmStreaming__Finish(WasmStreamingSharedPtr* self) {
+  self->inner->Finish();
+}
+
+void v8__WasmStreaming__Abort(WasmStreamingSharedPtr* self,
+                              const v8::Value* exception) {
+  self->inner->Abort(ptr_to_maybe_local(exception));
+}
+
 using HeapSnapshotCallback = bool (*)(void*, const char*, size_t);
 
 void v8__HeapProfiler__TakeHeapSnapshot(v8::Isolate* isolate,
@@ -2128,8 +2215,7 @@ V(does_zap_garbage)  // Returns size_t, not bool like you'd expect.
 
 extern "C" {
 void v8__ValueSerializer__Delegate__ThrowDataCloneError(
-    v8::ValueSerializer::Delegate* self,
-    v8::Local<v8::String> message);
+    v8::ValueSerializer::Delegate* self, v8::Local<v8::String> message);
 
 MaybeBool v8__ValueSerializer__Delegate__WriteHostObject(
     v8::ValueSerializer::Delegate* self, v8::Isolate* isolate,
@@ -2159,8 +2245,7 @@ struct v8__ValueSerializer__Delegate : public v8::ValueSerializer::Delegate {
   v8::Maybe<bool> WriteHostObject(v8::Isolate* isolate,
                                   v8::Local<v8::Object> object) override {
     return maybe_bool_to_maybe(
-        v8__ValueSerializer__Delegate__WriteHostObject(this, isolate,
-                                                             object));
+        v8__ValueSerializer__Delegate__WriteHostObject(this, isolate, object));
   }
 
   v8::Maybe<uint32_t> GetSharedArrayBufferId(
@@ -2217,8 +2302,8 @@ void v8__ValueSerializer__DESTRUCT(v8::ValueSerializer* self) {
   self->~ValueSerializer();
 }
 
-void v8__ValueSerializer__Release(v8::ValueSerializer* self,
-                                  uint8_t** ptr, size_t* size) {
+void v8__ValueSerializer__Release(v8::ValueSerializer* self, uint8_t** ptr,
+                                  size_t* size) {
   auto result = self->Release();
   *ptr = result.first;
   *size = result.second;
@@ -2271,13 +2356,13 @@ v8__ValueDeserializer__Delegate__GetSharedArrayBufferFromId(
     v8::ValueDeserializer::Delegate* self, v8::Isolate* isolate,
     uint32_t transfer_id);
 
-v8::WasmModuleObject*
-v8__ValueDeserializer__Delegate__GetWasmModuleFromId(
+v8::WasmModuleObject* v8__ValueDeserializer__Delegate__GetWasmModuleFromId(
     v8::ValueDeserializer::Delegate* self, v8::Isolate* isolate,
     uint32_t clone_id);
 }
 
-struct v8__ValueDeserializer__Delegate : public v8::ValueDeserializer::Delegate {
+struct v8__ValueDeserializer__Delegate
+    : public v8::ValueDeserializer::Delegate {
   v8::MaybeLocal<v8::Object> ReadHostObject(v8::Isolate* isolate) override {
     return ptr_to_maybe_local(
         v8__ValueDeserializer__Delegate__ReadHostObject(this, isolate));
@@ -2293,8 +2378,8 @@ struct v8__ValueDeserializer__Delegate : public v8::ValueDeserializer::Delegate 
   v8::MaybeLocal<v8::WasmModuleObject> GetWasmModuleFromId(
       v8::Isolate* isolate, uint32_t clone_id) override {
     return ptr_to_maybe_local(
-        v8__ValueDeserializer__Delegate__GetWasmModuleFromId(
-            this, isolate, clone_id));
+        v8__ValueDeserializer__Delegate__GetWasmModuleFromId(this, isolate,
+                                                             clone_id));
   }
 };
 

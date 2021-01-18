@@ -1,4 +1,5 @@
 // Copyright 2018-2019 the Deno authors. All rights reserved. MIT license.
+use fslock::LockFile;
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -27,7 +28,23 @@ fn main() {
     if env::var_os("V8_FROM_SOURCE").is_some() {
       build_v8()
     } else {
+      // utilize a lockfile to prevent linking of
+      // only partially downloaded static library.
+      let root = env::current_dir().unwrap();
+      let out_dir = env::var_os("OUT_DIR").unwrap();
+      let lockfilepath = root
+        .join(out_dir)
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("lib_download.fslock");
+      println!("download lockfile: {:?}", &lockfilepath);
+      let mut lockfile = LockFile::open(&lockfilepath)
+        .expect("Couldn't open lib download lockfile.");
+      lockfile.lock().expect("Couldn't get lock");
       download_static_lib_binaries();
+      lockfile.unlock().expect("Couldn't unlock lockfile");
     }
   }
 
@@ -146,7 +163,7 @@ fn platform() -> &'static str {
 fn download_ninja_gn_binaries() {
   let target_dir = build_dir();
   let bin_dir = target_dir
-    .join("ninja_gn_binaries-20200827")
+    .join("ninja_gn_binaries-20210101")
     .join(platform());
   let gn = bin_dir.join("gn");
   let ninja = bin_dir.join("ninja");
@@ -287,8 +304,10 @@ fn print_link_flags() {
 }
 
 fn need_gn_ninja_download() -> bool {
-  !((which("ninja").is_ok() || env::var_os("NINJA").is_some())
-    && env::var_os("GN").is_some())
+  let has_ninja = which("ninja").is_ok() || env::var_os("NINJA").is_some();
+  let has_gn = which("gn").is_ok() || env::var_os("GN").is_some();
+
+  return !has_ninja || !has_gn;
 }
 
 // Chromiums gn arg clang_base_path is currently compatible with:

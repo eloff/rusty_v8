@@ -61,14 +61,14 @@ Then populate the cache:
 
 # see https://github.com/denoland/rusty_v8/releases
 
-for REL in v0.9.0 v0.10.0; do
+for REL in v0.13.0 v0.12.0; do
   mkdir -p $RUSTY_V8_MIRROR/$REL
   for FILE in \
     librusty_v8_debug_x86_64-unknown-linux-gnu.a \
     librusty_v8_release_x86_64-unknown-linux-gnu.a \
   ; do
     if [ ! -f $RUSTY_V8_MIRROR/$REL/$FILE ]; then
-      wget -O $CACHE_DIR/$REL/$FILE \
+      wget -O $RUSTY_V8_MIRROR/$REL/$FILE \
         https://github.com/denoland/rusty_v8/releases/download/$REL/$FILE
     fi
   done
@@ -91,15 +91,16 @@ install them.
 For Windows builds: the 64-bit toolchain needs to be used. 32-bit targets are
 not supported.
 
-The build depends on several binary tools: `gn`, `ninja` and a recent version
-of `clang` (V8 relies on bleeding edge features). Because these are not
-generally available they are automatically downloaded during the build by default.
-It should be possible to opt out of the gn and ninja download by specifying the
-`$GN` and `$NINJA` environmental variables. The clang download can be skipped by
-providing a `$CLANG_BASE_PATH` environmental variable pointing to a recent
-`llvm`/`clang` installation (currently LLVM v8.0+ or Apple clang v11.0+).
-You could also pass in additional arguments to `gn` by setting the `$GN_ARGS`
-environmental variable.
+The build depends on several binary tools: `gn`, `ninja` and `clang`. The
+tools will automatically be downloaded, if they are not detected in the environment.
+
+Specifying the `$GN` and `$NINJA` environmental variables can be used to skip
+the download of gn and ninja. The clang download can be skipped by setting
+`$CLANG_BASE_PATH` to the directory containing a `llvm`/`clang` installation.
+V8 is known to rely on bleeding edge features, so LLVM v8.0+ or Apple clang 11.0+
+is recommended.
+
+Arguments can be passed to `gn` by setting the `$GN_ARGS` environmental variable.
 
 Env vars used in when building from source: `SCCACHE`, `CCACHE`, `GN`, `NINJA`,
 `CLANG_BASE_PATH`, `GN_ARGS`

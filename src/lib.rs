@@ -67,9 +67,11 @@ mod support;
 mod symbol;
 mod template;
 mod typed_array;
+mod unbound_script;
 mod value;
 mod value_deserializer;
 mod value_serializer;
+mod wasm;
 
 pub mod inspector;
 pub mod json;
@@ -124,7 +126,8 @@ pub use script::ScriptOrigin;
 pub use snapshot::FunctionCodeHandling;
 pub use snapshot::SnapshotCreator;
 pub use snapshot::StartupData;
-pub use string::*;
+pub use string::NewStringType;
+pub use string::WriteOptions;
 pub use support::SharedPtr;
 pub use support::SharedRef;
 pub use support::UniquePtr;
@@ -137,6 +140,7 @@ pub use value_deserializer::ValueDeserializerImpl;
 pub use value_serializer::ValueSerializer;
 pub use value_serializer::ValueSerializerHelper;
 pub use value_serializer::ValueSerializerImpl;
+pub use wasm::WasmStreaming;
 
 // TODO(piscisaureus): Ideally this trait would not be exported.
 pub use support::MapFnTo;

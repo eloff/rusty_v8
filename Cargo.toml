@@ -1,6 +1,6 @@
 [package]
 name = "rusty_v8"
-version = "0.14.0"
+version = "0.15.0"
 description = "Rust bindings to V8"
 readme = "README.md"
 authors = ["the Deno authors"]
@@ -57,6 +57,7 @@ bitflags = "1.2.1"
 [build-dependencies]
 cargo_gn = "0.0.15"
 which = "4.0.2"
+fslock = "0.1"
 
 [dev-dependencies]
 trybuild = "1.0.35"
